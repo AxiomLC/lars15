@@ -1,0 +1,23 @@
+# secrets & local state — never commit
+.env
+*.env
+server/config/server.yaml
+server/certs/
+server/logs/
+server/hud/audio/
+server/hud/jarvis.cer
+
+# worker local files
+worker/run-stt.bat
+worker/stt_server.log
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os
+.DS_Store
+Thumbs.db
+nohup.out
