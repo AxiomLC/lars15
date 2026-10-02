@@ -182,3 +182,62 @@ async function connectLiveKitVoice(engineMode = "cloud") {
 - Kokoro-onnx local first-token latency on i7-6600U - lars13 rejected local TTS for the
   default path; local mode here is a MENU OPTION, not the default.
 - Browser autoplay policy: first speaking audio needs one user gesture (ring click).
+
+---
+# ADDENDUM A — RESEARCH FINDINGS LOCKED — 2026-10-02
+
+## 1. Official precedent: Hermes full-duplex voice (`voice-live`, desktop GPT-Live)
+
+Hermes docs (user-guide/features/voice-mode) ship a full-duplex WebRTC voice mode whose
+binding pattern lars15 MUST MIRROR:
+
+- Voice client opens a WebRTC session; the GATEWAY (host) creates it via
+  `POST /api/audio/voice-live/session`. Secrets never reach the client — the client only
+  ever holds session id + SDP answer.
+- Each voice exchange becomes `session.delegation.created` -> a NORMAL TURN on the open
+  chat session (same session id, full history continuity).
+- Streaming reply is sentence-buffered (min 20 chars), markdown stripped, per-sentence
+  audio; chunked-PCM providers stream raw for lowest time-to-first-word.
+- Relay path (providers that must run on the host): `POST /api/audio/transcribe`
+  + gateway speech WebSocket. `voice.client_direct: false` forces everything through it.
+- Stop phrase ends the conversation; tool activity is narrated as quiet context.
+
+LESSON for lars15: bind the LiveKit room to the OPEN 'lars' session and emit turns as
+normal session turns -> continuity across desktop/dashboard hops is native (all
+surfaces share one SessionDB/state.db session store).
+
+## 2. Continuity hazards (external clients)
+
+- GitHub issue #16938: when Hermes auto-COMPRESSES a session, the API server keeps
+  echoing the stale parent `X-Hermes-Session-Id` -> external clients reload uncompressed
+  parent history. Rule for lars15: NEVER cache-and-blindly-reuse session ids. Always
+  re-read the session id from response/SSE metadata each turn; on stale/missing-id
+  continue via `SessionDB.get_compression_tip()`-equivalent behavior: fresh lookup then
+  rebind (same 'resume -> LIVE id' discipline proven in the lars Lars-bridge).
+- Session lease: one client turn owns the session at a time; parallel writes from
+  another surface get busy/SENT_NOT_OWNED style conflicts while a run is live.
+  lars15 must do attach-per-turn (bind at turn start, release cleanly after),
+  reading fresh live ids (see lars13 setupREADME Lars-bridge mechanics).
+
+## 3. DECIDED for lars15 (was the only open design question)
+
+- LLM interface of the LiveKit pipeline agent = the SESSION chat/stream bridge
+  (`POST /api/sessions/{id}/chat/stream`, body `{"input": text}`, Accept: text/event-stream),
+  implemented as a custom LiveKit LLM plugin — NOT the stateless
+  `/v1/chat/completions` shim. Rationale: identical to the official voice-live pattern,
+  preserves 'lars' session continuity + compression handling.
+- STT/TTS: provider toggles carried from lars13 (default deepgram aura-asteria-en —
+  Aura-2 is permission-locked on this project). Cloud/local engine switch via
+  livekit.engine_mode.
+- Providers run through lars15's adapters (yield PCM) feeding LiveKit source tracks.
+  Barge-in = LiveKit-native (agent playback interrupt) — no custom code.
+- HUD: 4-panel outline (top/left/center/right) from lars13 as the frame; Hermes
+  gateway endpoints only feed panels — NO extra servers, NO :9119 dependency for
+  panel data (dashboard proxy only optional for kanban embeds).
+- `hermes-plugin/hud_display` remains the agent's channel to summon/clear media
+  panels inside the HUD; lars15 consumes its payloads via the session event feed.
+
+## 4. Deferred (later, user-initiated)
+
+- Single full-page kanban-style summary of all Hermes jobs, summonable by Lars
+  (separate page, gateway endpoints as data source).
