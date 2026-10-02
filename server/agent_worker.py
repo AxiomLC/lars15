@@ -1,29 +1,40 @@
 #!/usr/bin/env python3
 """lars15 LiveKit voice-pipeline agent worker.
 
-Job: join the LiveKit room, publish/transcribe the user's mic via plugin STT,
-drive the LLM turn through the Hermes session chat/stream bridge, and stream
-the reply back as agent audio through the TTS provider adapters.
+Join the LiveKit room, transcribe the user's mic (plugin STT), drive the LLM
+turn through the Hermes session chat/stream bridge, stream the reply back as
+agent audio through lars13's provider TTS adapters. Barge-in is LiveKit-native.
 
-Barge-in is LiveKit-native: preemption of agent playback when the participant
-speaks (VAD) — no custom code. Run:  python server/agent_worker.py dev
+Run:  .venv\\Scripts\\python.exe server\\agent_worker.py dev
 """
 from __future__ import annotations
 
 import asyncio
+import datetime
+import json  # used in _parse_sse of the pump thread
+import datetime
 import os
 import re
-import time
+import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import requests
 import yaml
 
-from livekit import agents, api, rtc
+from livekit import api as lk_api, rtc
 from livekit.agents import (
-    Agent, AgentSession, JobContext, JobProcess, RoomInputOptions, WorkerOptions,
-    cli, llm, tts as lk_tts, stt as lk_stt,
+    APIConnectOptions,
+    Agent,
+    AgentSession,
+    JobContext,
+    JobProcess,
+    RoomInputOptions,
+    WorkerOptions,
+    cli,
+    llm,
+    tts as lk_tts,
+    stt as lk_stt,
 )
 from livekit.plugins import silero
 
@@ -48,6 +59,9 @@ HERMES_BASE = ((CFG.get("hermes") or {}).get("base_url") or "http://127.0.0.1:86
 HERMES_PROFILE = (CFG.get("hermes") or {}).get("profile_session", "lars")
 API_KEY_ENV = (CFG.get("hermes") or {}).get("api_key_env", "API_SERVER_KEY")
 
+sys.path.insert(0, str(ROOT))
+from server15 import clean_for_tts, tts_chunks, TurnTiming  # noqa: E402
+
 
 def hermes_headers() -> dict:
     key = os.environ.get(API_KEY_ENV, "")
@@ -57,7 +71,7 @@ def hermes_headers() -> dict:
 
 
 def fresh_live_session() -> str:
-    """Fresh live session id per turn (never trust cached: #16938)."""
+    """Fresh live session id per turn (never trust cached: issue #16938)."""
     base = f"{HERMES_BASE}/api/sessions"
     r = requests.get(base, headers=hermes_headers(),
                      params={"profile": HERMES_PROFILE, "limit": 1}, timeout=15)
@@ -78,31 +92,68 @@ def stop_run(run_id: str) -> dict:
     return {"status_code": r.status_code, "body": r.text[:200]}
 
 
-def clean_for_tts(text: str) -> str:
-    if not text:
-        return ""
-    text = re.sub(r".*?", "", text, flags=re.S)
-    text = re.sub(r"```.*?```", " code omitted. ", text, flags=re.S)
-    text = re.sub(r"`([^`]*)`", r"\1", text)
-    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"[\s>*#-]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+SENTENCE_END = re.compile(r"[.!?]\s")
+
+
+def _parse_sse_stream(resp, queue, loop) -> None:
+    """Blocking SSE parse; queue ('text',s) increments, (None,) final."""
+    event = ""
+    for raw in resp.iter_lines(decode_unicode=True):
+        if raw is None:
+            continue
+        if raw == "":
+            event = ""
+            continue
+        if raw.startswith("event:"):
+            event = raw[6:].strip()
+            continue
+        if not raw.startswith("data:"):
+            continue
+        data = raw[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            payload = {"text": data}
+        etype = event or payload.get("event") or payload.get("type") or ""
+        if etype in ("assistant.delta", "message.delta", "delta"):
+            text = payload.get("text") or payload.get("delta") or ""
+            if text:
+                loop.call_soon_threadsafe(queue.put_nowait, ("text", text))
+        elif etype in ("run.started", "run_started"):
+            pass
+        elif etype in ("assistant.completed", "run.completed", "run.failed",
+                       "run.cancelled", "message.complete"):
+            loop.call_soon_threadsafe(queue.put_nowait, (None, None))
+            return
+    loop.call_soon_threadsafe(queue.put_nowait, (None, None))  # stream ended
 
 
 class HermesSessionLLM(llm.LLM):
-    """LiveKit LLM plugin that drives one turn through the Hermes session
-    chat/stream SSE endpoint (the official voice-live binding pattern)."""
+    """LiveKit LLM plugin: one turn through the Hermes session chat/stream SSE
+    endpoint (the official voice-live binding pattern)."""
 
     def __init__(self):
         self.run_id = ""
 
-    def chat(self, ctx: llm.ChatContext, options=None) -> AsyncIterator[llm.ChatChunk]:
-        return self._stream(ctx)
+    def chat(self, *, chat_ctx, tools=None, conn_options=None,
+             parallel_tool_calls=None, tool_choice=None, extra_kwargs=None):
+        return HermesLLMStream(self, chat_ctx=chat_ctx, tools=tools or [],
+                               conn_options=conn_options or APIConnectOptions())
 
-    async def _stream(self, ctx: llm.ChatContext) -> AsyncIterator[llm.ChatChunk]:
+
+class HermesLLMStream(llm.LLMStream):
+    def __init__(self, llm_ref, *, chat_ctx, tools, conn_options):
+        super().__init__(llm_ref, chat_ctx=chat_ctx, tools=tools,
+                         conn_options=conn_options)
+        self._session_llm = llm_ref
+
+    async def _run(self) -> AsyncIterator[llm.ChatChunk]:
+        llm_ref = self._session_llm
         latest = ""
-        for item in reversed(ctx.items):
-            if item.role == "user" and isinstance(item, llm.ChatMessage):
+        for item in reversed(self.chat_ctx.items):
+            if getattr(item, "role", None) == "user":
                 latest = item.text_content or ""
                 break
         if not latest.strip():
@@ -111,8 +162,8 @@ class HermesSessionLLM(llm.LLM):
         queue: asyncio.Queue = asyncio.Queue()
 
         def pump() -> None:
-            session_id = fresh_live_session()
             try:
+                session_id = fresh_live_session()
                 r = requests.post(
                     f"{HERMES_BASE}/api/sessions/{session_id}/chat/stream",
                     headers={**hermes_headers(), "Accept": "text/event-stream"},
@@ -120,104 +171,108 @@ class HermesSessionLLM(llm.LLM):
                 if r.status_code >= 400:
                     raise RuntimeError(f"Hermes chat HTTP {r.status_code}: {r.text[:200]}")
                 r.encoding = "utf-8"
-                event = ""
-                for raw in r.iter_lines(decode_unicode=True):
-                    if raw is None:
-                        continue
-                    if raw == "":
-                        event = ""
-                        continue
-                    if raw.startswith("event:"):
-                        event = raw[6:].strip()
-                        continue
-                    if not raw.startswith("data:"):
-                        continue
-                    data = raw[5:].strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    try:
-                        payload = json.loads(data)
-                    except ValueError:
-                        payload = {"text": data}
-                    etype = event or payload.get("event") or payload.get("type") or ""
-                    if etype in ("assistant.delta", "message.delta", "delta"):
-                        text = payload.get("text") or payload.get("delta") or ""
-                        if text:
-                            loop.call_soon_threadsafe(queue.put_nowait, ("text", text))
-                    elif etype in ("run.started", "run_started"):
-                        self.run_id = str(payload.get("run_id") or payload.get("id") or "")
-                    elif etype in ("assistant.completed", "run.completed", "run.failed",
-                                   "run.cancelled", "message.complete"):
-                        loop.call_soon_threadsafe(queue.put_nowait, (None, None))
-                        return
-                loop.call_soon_threadsafe(queue.put_nowait, (None, None))
+                _parse_sse_stream(r, queue, loop)
             except Exception as exc:
                 loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
+            finally:
+                try:
+                    r.close()
+                except Exception:
+                    pass
 
-        import json as _json  # local alias to keep module namespace clean
         await asyncio.to_thread(pump)
 
-        sentence_parts: list[str] = []
+        parts = []
         while True:
             kind, value = await queue.get()
             if kind is None:
                 break
             if kind == "error":
                 raise RuntimeError(value)
-            sentence_parts.append(value)
-            text = "".join(sentence_parts)
-            # emit in sentence-sized chunks (mirrors Hermes voice-live sentence
-            # buffering so TTS starts before the reply finishes generating)
-            m = list(re.finditer(r"[.!?]\s", text))
+            parts.append(value)
+            text = "".join(parts)
+            # emit in sentence-sized chunks (voice-live sentence buffering)
+            m = list(SENTENCE_END.finditer(text))
             if m:
                 cut = m[-1].end()
                 spoken = text[:cut]
-                sentence_parts = [text[cut:]]
+                parts = [text[cut:]]
                 clean = clean_for_tts(spoken)
                 if clean:
-                    yield llm.ChatChunk(text=clean)
+                    yield llm.ChatChunk(text=clean, request_id="hermes")
 
-        clean = clean_for_tts("".join(sentence_parts))
+        clean = clean_for_tts("".join(parts))
         if clean:
-            yield llm.ChatChunk(text=clean)
+            yield llm.ChatChunk(text=clean, request_id="hermes")
 
 
 # ------------------------------------------------------------------- TTS plugin
 
-class AdapterTTS(lk_tts.TTS):
-    """Bridges lars13's provider adapters (raw pcm iterator) into LiveKit TTS."""
+class AdapterChunkedStream(lk_tts.ChunkedStream):
+    """Pumps lars13 adapter pcm into LiveKit SynthesizedAudio frames."""
 
-    def __init__(self, cfg: dict):
-        v = cfg["voice"]
-        super().__init__(sample_rate=v.get("sample_rate", 16000), num_channels=1)
-        self.cfg = cfg
+    def __init__(self, *, tts, input_text, conn_options, cfg):
+        super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
+        self._cfg = cfg
 
-    async def run(self, text: str) -> AsyncIterator[lk_tts.ChunkedAudio]:
-        # AdapterTTS synthesizes fully then streams (acceptable for cloud
-        # providers whose HTTP path is already streamed by the adapter itself).
-        import sys
-        sys.path.insert(0, str(ROOT))
-        from server15 import tts_chunks, TurnTiming, clean_for_tts
+    async def _run(self) -> AsyncIterator[lk_tts.SynthesizedAudio]:
+        request_id = f"lars15-{int(asyncio.get_event_loop().time()*1e6)}"
         timing = TurnTiming()
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
 
         def pump() -> None:
             try:
-                for chunk in tts_chunks(self.cfg, clean_for_tts(text), timing):
+                for chunk in tts_chunks(self._cfg, self._input_text, timing):
                     loop.call_soon_threadsafe(queue.put_nowait, chunk)
                 loop.call_soon_threadsafe(queue.put_nowait, None)
             except Exception as exc:
                 loop.call_soon_threadsafe(queue.put_nowait, exc)
 
         await asyncio.to_thread(pump)
+        seg = 0
         while True:
             chunk = await queue.get()
             if chunk is None:
                 break
             if isinstance(chunk, Exception):
                 raise chunk
-            yield lk_tts.ChunkedAudio(audio=chunk)
+            n = len(chunk) // 2  # s16le mono
+            i16 = memoryview(chunk).cast("h")
+            # one rtc frame per 20ms (320 samples @16k)
+            step = 320
+            next_start = None
+            for off in range(0, n - step + 1, step):
+                samples = i16[off:off + step]
+                fr = rtc.AudioFrame(
+                    data=samples,
+                    num_channels=1,
+                    samples_per_channel=step,
+                    sample_rate=16000,
+                )
+                next_start = (seg + off // step)
+                yield lk_tts.SynthesizedAudio(frame=fr, request_id=request_id, is_final=False, segment_id=str(next_start))
+            seg += (n // step)
+        yield lk_tts.SynthesizedAudio(
+            frame=rtc.AudioFrame(data=memoryview(b"\x00\x00" * 320).cast("h"),
+                                 num_channels=1, samples_per_channel=320, sample_rate=16000),
+            request_id=request_id, is_final=True, segment_id=str(seg))
+
+
+class AdapterTTS(lk_tts.TTS):
+    """Bridges lars13 provider adapters (raw pcm iterator) into LiveKit TTS."""
+
+    def __init__(self, cfg: dict):
+        from livekit.agents.tts import TTSCapabilities
+        v = cfg["voice"]
+        super().__init__(capabilities=TTSCapabilities(streaming=False),
+                         sample_rate=v.get("sample_rate", 16000), num_channels=1)
+        self._cfg = cfg
+
+    def synthesize(self, text, conn_options=None):
+        return AdapterChunkedStream(tts=self, input_text=text,
+                                   conn_options=conn_options or APIConnectOptions(),
+                                   cfg=self._cfg)
 
 
 # ------------------------------------------------------------------- STT plugin
@@ -226,9 +281,9 @@ def build_stt(mode: str) -> lk_stt.STT:
     if mode == "cloud":
         from livekit.plugins import groq as lk_groq
         return lk_groq.STT(model="whisper-large-v3-turbo")
-    # local: faster-whisper through LiveKit's stt fallback plugin adapter
-    from livekit.plugins.openai import STT as OpenAIStyleSTT  # shape-compatible shim
-    return OpenAIStyleSTT(base_url="http://127.0.0.1:8768/v1")  # worker/stt_server.py sidecar
+    # local: whisper sidecar exposing OpenAI-compatible /v1/audio/transcriptions
+    from livekit.plugins.openai import STT as OpenAISTT
+    return OpenAISTT(base_url="http://127.0.0.1:8768/v1")
 
 
 async def entrypoint(ctx: JobContext):
