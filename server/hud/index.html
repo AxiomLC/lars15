@@ -10,6 +10,7 @@
 <meta name="theme-color" content="#050b14">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
 <style>
 :root{
   --bg:#050b14; --panel:#081523cc; --line:#0e2c40;
@@ -361,10 +362,9 @@ footer{
 <script>
 "use strict";
 /* ============================== state ============================== */
-const CONV = "jarvis-main";
-let ws=null, wsReady=false, capturing=false, state="standby";
-let audioCtx=null, workletNode=null, mediaStream=null, srcNode=null;
-let playhead=0, activeSources=[], leftoverByte=null, audioArrived=false;
+const CONV = "lars";
+let lkRoom = null, lkConnected = false, state = "standby";
+let playhead = 0, activeSources = [], leftoverByte = null, audioArrived = false;
 let level=0, turns=0;
 
 const $=id=>document.getElementById(id);
@@ -456,10 +456,13 @@ function showLive(text){
 }
 function clearLive(){ if(liveEl){liveEl.remove(); liveEl=null;} }
 function showStop(on){ $("stopBtn").style.display=on?"block":"none"; }
-function stopRun(){
+async function stopRun(){
   stopPlayback();
-  if(wsReady)ws.send(JSON.stringify({type:"stop_run"}));
-  showStop(false);
+  if(currentRun){
+    try{ await fetch("/api/agent/stop",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({run_id:currentRun})}); }catch{}
+  }
+  currentRun=null; showStop(false);
 }
 
 /* approval cards */
@@ -472,22 +475,60 @@ function showApproval(e){
   card.innerHTML=`<h3>⚠ APPROVAL REQUIRED</h3><pre>${esc(desc)}</pre>
     <div class="row"><button class="btn">ALLOW</button><button class="btn danger">DENY</button></div>`;
   const [allowB,denyB]=card.querySelectorAll("button");
-  const send=dec=>{ if(wsReady)ws.send(JSON.stringify({type:"approval_decision",run_id:e.run_id||currentRun,approval_id:id,decision:dec})); card.remove(); };
+  const send=dec=>{ (async()=>{
+    try{ await fetch("/api/agent/decision",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({run_id:e.run_id||currentRun,approval_id:id,decision:dec})}); }catch{}
+  })(); card.remove(); };
   allowB.onclick=()=>send("allow"); denyB.onclick=()=>send("deny");
   $("approvals").appendChild(card);
   addActivity("approval requested");
 }
 
-/* ============================== websocket ========================== */
-function wsUrl(){return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws"}
-function connect(){
-  ws=new WebSocket(wsUrl()); ws.binaryType="arraybuffer";
-  ws.onopen=()=>{wsReady=true;$("wsDot").className="dot on";$("wsState").textContent="online";$("connState").textContent="LINK ACTIVE";$("footMsg").textContent="VOICE SERVER CONNECTED"};
-  ws.onclose=()=>{wsReady=false;$("wsDot").className="dot off";$("wsState").textContent="offline";$("connState").textContent="LINK DOWN";setState("standby","STANDBY");setTimeout(connect,3000)};
-  ws.onerror=()=>{};
-  ws.onmessage=ev=>{
-    if(ev.data instanceof ArrayBuffer){playChunk(ev.data);return}
-    let e; try{e=JSON.parse(ev.data)}catch{return}
+/* ============================== LiveKit voice link ==================== */
+
+async function connectVoice(){
+  try{
+    const r=await fetch("/api/voice/token",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({sessionId:CONV})});
+    const j=await r.json(); if(!r.ok)throw new Error(j.detail||r.status);
+    if(lkRoom){try{lkRoom.disconnect()}catch{}}
+    lkRoom=new LivekitClient.Room({adaptiveStream:true,dynacast:true,
+      audioOutput:{echocancellation:true,noiseSuppression:true}});
+    lkRoom.on(LivekitClient.RoomEvent.Connected,()=>{
+      lkConnected=true; $("wsDot").className="dot on"; $("wsState").textContent="livekit: "+j.mode;
+      $("connState").textContent="LINK ACTIVE"; $("footMsg").textContent="VOICE LINK: LIVEKIT " + j.mode.toUpperCase();
+    });
+    lkRoom.on(LivekitClient.RoomEvent.Disconnected,()=>{
+      lkConnected=false; $("wsDot").className="dot off"; $("wsState").textContent="offline";
+      $("connState").textContent="LINK DOWN"; setState("standby","STANDBY");
+    });
+    lkRoom.on(LivekitClient.RoomEvent.TrackSubscribed,(track)=>{
+      if(track.kind===LivekitClient.Track.Kind.Audio){
+        const el=track.attach(); el.autoplay=true; el.play&&el.play().catch(()=>{});
+        document.body.appendChild(el);
+        setState("speaking","SPEAKING"); audioArrived=true;
+        track.on(LivekitClient.TrackEvent.Ended,()=>{ el.remove(); if(state==="speaking")setState("standby","STANDBY"); });
+      }
+    });
+    lkRoom.on(LivekitClient.RoomEvent.DataReceived,(payload)=>{
+      try{
+        const e=JSON.parse(new TextDecoder().decode(payload));
+        handleServerEvent(e);
+      }catch{}
+    });
+    await lkRoom.connect(j.wsUrl,j.token);
+    await lkRoom.localParticipant.setMicrophoneEnabled(true);
+    $("micDot").className="dot on"; $("micState").textContent="livekit mic";
+  }catch(err){
+    addMsg("sys","voice link error: "+err.message); setState("standby","STANDBY");
+    setTimeout(connectVoice,5000);
+  }
+}
+
+/* event channel — server pushes panel/transcript/status frames over the
+   LiveKit data channel; typed-chat/api events take the normal REST path. */
+function handleServerEvent(e){
     if(e.type==="summon_panel"){ summonPanel(e); }
     else if(e.type==="dismiss_panels"){ dismissAllPanels(); }
     else if(e.type==="partial_transcript"){ showLive(e.text); }
@@ -505,24 +546,29 @@ function connect(){
       currentRun=null; showStop(false);
       const tm=e.timing||{};
       turns++; $("mTurns").textContent=turns;
-      if(tm.end_of_speech_to_first_audio_seconds!=null)$("mFirst").textContent=tm.end_of_speech_to_first_audio_seconds+"s";
+      if(tm.time_to_first_tts_audio_byte_seconds!=null)$("mFirst").textContent=tm.time_to_first_tts_audio_byte_seconds+"s";
       if(tm.total_turn_seconds!=null)$("mTotal").textContent=tm.total_turn_seconds+"s";
       $("mBrain").textContent=tm.llm_provider||"—";
       if(tm.response_text)addMsg("jarvis",tm.response_text);
       setTimeout(()=>{if(state!=="listening")setState("standby","STANDBY")},400);
     }
-  };
 }
-connect();
 
-/* ============================== audio out ========================== */
+connectVoice();
+
+/* ============================== audio out (fallback path) ============= */
+/* LiveKit voice is now primary; audioCtx retained ONLY for the boot
+   sequence beeps. playChunk()/stopPlayback() kept as REST fallback no-ops. */
+let audioCtx=null;
 function ensureCtx(){
   if(!audioCtx){
-    try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000}); }
+    try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); }
     catch{ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); }
   }
   if(audioCtx.state==="suspended")audioCtx.resume();
 }
+function playChunk(){/* fallback: unused when LiveKit transport active */}
+function stopPlayback(){ activeSources.forEach(s=>{try{s&&s.stop&&s.stop()}catch{}}); activeSources=[]; playhead=0; }
 function playChunk(buf){
   ensureCtx();
   let bytes=new Uint8Array(buf);
@@ -541,73 +587,26 @@ function playChunk(buf){
 }
 function stopPlayback(){ activeSources.forEach(s=>{try{s.stop()}catch{}}); activeSources=[]; playhead=0; }
 
-/* ============================== audio in =========================== */
-const workletCode=`
-class PCM16K extends AudioWorkletProcessor{
-  constructor(){super();this.frac=0;this.acc=0;this.n=0;this.out=[];}
-  process(inputs){
-    const ch=inputs[0][0]; if(!ch)return true;
-    if(sampleRate===16000){            // context already at 16k: pass through
-      for(let i=0;i<ch.length;i++){
-        const v=Math.max(-1,Math.min(1,ch[i])); this.out.push(v*32767|0);
-      }
-    }else{                              // averaging (box-filter) downsample
-      for(let i=0;i<ch.length;i++){
-        this.acc+=ch[i]; this.n++; this.frac+=16000;
-        if(this.frac>=sampleRate){ this.frac-=sampleRate;
-          const v=Math.max(-1,Math.min(1,this.acc/this.n));
-          this.out.push(v*32767|0); this.acc=0; this.n=0; }
-      }
-    }
-    if(this.out.length>=1280){ // 80ms
-      const a=new Int16Array(this.out.splice(0,1280));
-      this.port.postMessage(a.buffer,[a.buffer]);
-    }
-    return true;
-  }
-}
-registerProcessor("pcm16k",PCM16K);`;
-let workletReady=false;
+/* ============================== audio in (LiveKit mic) ============== */
+/* Mic capture + level meter ride the LiveKit published track. The old
+   AudioWorklet 16k PCM capture is gone — WebRTC carries opus to the agent
+   worker, and LiveKit's SDK handles wolf/level meters via AudioAnalyser. */
 async function initMic(){
-  ensureCtx();
-  if(!workletReady){
-    const url=URL.createObjectURL(new Blob([workletCode],{type:"application/javascript"}));
-    await audioCtx.audioWorklet.addModule(url); workletReady=true;
+  if(lkConnected&&lkRoom&&lkRoom.localParticipant){
+    await lkRoom.localParticipant.setMicrophoneEnabled(true);
+    $("micDot").className="dot on"; $("micState").textContent="livekit mic";
   }
-  if(!mediaStream){
-    mediaStream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,sampleRate:16000,echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
-    srcNode=audioCtx.createMediaStreamSource(mediaStream);
-    workletNode=new AudioWorkletNode(audioCtx,"pcm16k");
-    workletNode.port.onmessage=e=>{
-      if(capturing&&wsReady)ws.send(e.data);
-      // level meter
-      const a=new Int16Array(e.data); let s=0;
-      for(let i=0;i<a.length;i+=8)s+=Math.abs(a[i]);
-      level=Math.min(1,(s/(a.length/8))/9000);
-      if(capturing)$("levelBar").style.width=(level*100).toFixed(0)+"%";
-    };
-    srcNode.connect(workletNode);
-  }
-  $("micDot").className="dot on"; $("micState").textContent="ready";
 }
 
 /* ============================== talk flow ========================== */
+/* With LiveKit the mic is ALWAYS live while connected (full duplex): the
+   ring click now toggles local barge-in/session state only. Server events
+   (transcript, status, panels) still arrive over the data channel. */
 async function toggleTalk(){
-  if(!wsReady){addMsg("sys","voice server offline");return}
-  if(capturing){ // stop talking
-    capturing=false;
-    ws.send(JSON.stringify({type:"stop"}));
-    $("talkBtn").textContent="ENGAGE VOICE"; $("micState").textContent="ready"; $("levelBar").style.width="0%";
-    setState("thinking","PROCESSING");
-    return;
-  }
-  try{await initMic()}catch(err){addMsg("sys","mic blocked: "+err.message);return}
-  stopPlayback();                       // barge-in
-  audioArrived=false;
-  ws.send(JSON.stringify({type:"start",sample_rate:16000,format:"pcm_s16le",channels:1,conversation:CONV}));
-  capturing=true;
-  $("talkBtn").textContent="■ STOP & SEND"; $("micState").textContent="LIVE";
-  setState("listening","LISTENING","CLICK AGAIN TO SEND");
+  if(!lkConnected){await connectVoice();return}
+  if(state==="listening"){ setState("thinking","PROCESSING"); return; }
+  stopPlayback(); // barge-in safety
+  setState("listening","LISTENING","SPEAK WHEN READY");
 }
 $("talkBtn").onclick=toggleTalk;
 $("reactorWrap").onclick=toggleTalk;
@@ -642,12 +641,12 @@ async function sendChat(){
   const inp=$("chatInput"); const text=inp.value.trim(); if(!text)return;
   inp.value=""; addMsg("you",text); setState("thinking","PROCESSING");
   try{
-    const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({input:text,conversation:CONV})});
+    const r=await fetch("/api/agent/turn",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({input:text,profile:CONV})});
     const j=await r.json();
-    if(!r.ok)throw new Error(j.error||r.status);
-    (j.tools||[]).forEach(t=>addActivity("",t.name,t.preview));
-    addMsg("jarvis",j.text||"(no reply)");
+    if(!r.ok)throw new Error(j.detail||r.status);
+    (j.tools_used||[]).forEach(t=>addActivity("",t,""));
+    addMsg("jarvis",j.response||"(no reply)");
     if(/^\/(new|reset|clear)\b/i.test(text)){     // slash reset → also clear the visible feed
       setTimeout(()=>{feed.innerHTML="";addMsg("sys","conversation reset");},800);
     }
