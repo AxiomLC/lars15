@@ -38,7 +38,10 @@ for path in ENV_PATHS:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+            value = value.strip().strip('"').strip("'")
+            if key.strip() == "LIVEKIT_API_SECRET":
+                value = value.replace(" ", "").replace("\t", "")  # paste-artifact guard
+            os.environ.setdefault(key.strip(), value)
 
 CFG = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
 HERMES_BASE = ((CFG.get("hermes") or {}).get("base_url") or "http://127.0.0.1:8642").rstrip("/")

@@ -1,0 +1,6 @@
+lars15 server on http://0.0.0.0:8646/hud/ (LiveKit mode: cloud)
+INFO:     Started server process [10532]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8646 (Press CTRL+C to quit)
+INFO:     127.0.0.1:51595 - "POST /api/voice/token HTTP/1.1" 200 OK

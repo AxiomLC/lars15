@@ -6,9 +6,9 @@ hermes:
   timeout: 240
 
 livekit:
-  engine_mode: cloud                 # local | cloud
-  local_ws_url: ws://127.0.0.1:7880
-  cloud_ws_url: wss://YOUR-PROJECT.livekit.cloud
+  engine_mode: cloud                 # local | cloud  (or env LIVEKIT_ENGINE_MODE)
+  local_ws_url: ws://127.0.0.1:7880  # livekit-server --dev (local mode)
+  cloud_ws_url: wss://lars-2njzgafy.livekit.cloud
 
 voice:
   provider: deepgram                 # deepgram | fishaudio | groq | deepinfra | elevenlabs | local

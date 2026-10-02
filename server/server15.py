@@ -15,6 +15,7 @@ The audio transport itself is LiveKit's job (server/agent_worker.py + HUD SDK).
 from __future__ import annotations
 
 import asyncio
+import datetime
 import io
 import json
 import os
@@ -180,7 +181,7 @@ class HermesBridge:
         grant = livekit_api.VideoGrants(room_join=True, room=self.profile)
         token = livekit_api.AccessToken(lk["api_key"], lk["api_secret"],
                                         identity=f"{self.profile}-hud")
-        token.with_grants(grant).with_ttl(3600)
+        token.with_grants(grant).with_ttl(datetime.timedelta(hours=1))
         return token.to_jwt()
 
     def set_livekit(self, lk: dict):
@@ -383,22 +384,30 @@ BRIDGE = HermesBridge(CFG)
 app = FastAPI(title="lars15")
 
 
+def resolve_livekit(lk: dict) -> tuple[str, str, str]:
+    """Dev toggle: LIVEKIT_ENGINE_MODE env var wins over yaml engine_mode.
+    Returns (ws_url, mode, engine_label). Both modes use the same agent code."""
+    mode = (os.getenv("LIVEKIT_ENGINE_MODE") or lk.get("engine_mode") or "cloud").lower()
+    ws_url = lk.get("cloud_ws_url") if mode == "cloud" else lk.get("local_ws_url")
+    return ws_url, mode, "livekit-cloud" if mode == "cloud" else "livekit-local"
+
+
 @app.post("/api/voice/token")
 async def voice_token(payload: dict):
     """Hand the browser ONLY a room identity+jwt — never provider secrets."""
     lk = CFG.get("livekit") or {}
-    mode = payload.get("mode", lk.get("engine_mode", "cloud"))
-    ws_url = lk.get("cloud_ws_url") if mode == "cloud" else lk.get("local_ws_url")
     if not livekit_api:
         raise HTTPException(503, "livekit-api missing")
     key = os.environ.get("LIVEKIT_API_KEY", lk.get("api_key", ""))
     secret = os.environ.get("LIVEKIT_API_SECRET", lk.get("api_secret", ""))
     if not key or not secret:
         raise HTTPException(503, "LIVEKIT_API_KEY/SECRET not configured")
+    ws_url, mode, label = resolve_livekit(lk)
     grant = livekit_api.VideoGrants(room_join=True, room=payload.get("sessionId", "lars"))
-    token = livekit_api.AccessToken(key, secret, identity=f"lars-hud-{int(time.time())%100000}")
-    token.with_grants(grant).with_ttl(3600)
-    return {"token": token.to_jwt(), "wsUrl": ws_url, "mode": mode}
+    token = (livekit_api.AccessToken(key, secret)
+             .with_identity(f"lars-hud-{int(time.time())%100000}")
+             .with_grants(grant).with_ttl(datetime.timedelta(hours=1)))
+    return {"token": token.to_jwt(), "wsUrl": ws_url, "mode": mode, "engine": label}
 
 
 @app.get("/api/health")
@@ -411,8 +420,10 @@ async def health():
                                         timeout=4).status_code in (200, 401, 403)
     except Exception as exc:
         probes["hermes"] = f"down: {exc}"
-    instances = {"gateway(8642)": probes.get("hermes") is True}
-    return {"status": "ok", "hermes": probes, "profile": BRIDGE.profile}
+    ws_url, mode, label = resolve_livekit(CFG.get("livekit") or {})
+    return {"status": "ok", "hermes": probes, "profile": BRIDGE.profile,
+            "livekit": {"mode": mode, "ws_url": ws_url,
+                        "keys": bool(os.environ.get("LIVEKIT_API_KEY"))}}
 
 
 @app.post("/api/agent/turn")
