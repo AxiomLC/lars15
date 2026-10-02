@@ -11,8 +11,8 @@ llm:
 hermes:
   base_url: http://127.0.0.1:8642   # Hermes Agent API server (loopback)
   api_key_env: API_SERVER_KEY       # read from ~/.hermes/.env
-  conversation: jarvis-main          # shared voice + HUD thread name
-  session_key: jarvis:user:main      # stable long-term memory scope
+  conversation: lars-main          # shared voice + HUD thread name
+  session_key: lars:user:main      # stable long-term memory scope
   timeout: 240
   ack_after_seconds: 0               # >0 = speak a short ack while the agent works
   ack_texts: ["On it.", "Still working.", "Almost there."]
@@ -36,7 +36,7 @@ stt:
   # remote:
   #   name: gpu
   #   url: http://192.168.1.50:8768/stt
-  #   token_env: JARVIS_HUD_TOKEN
+  #   token_env: LARS_HUD_TOKEN
   #   timeout: 6
 
 machines:                   # polled by /api/machines for the HUD panel (optional)
@@ -61,7 +61,7 @@ server:
     target: http://127.0.0.1:9119
 
 security:
-  hud_token_env: JARVIS_HUD_TOKEN   # set in ~/.hermes/.env; unset = auth disabled
+  hud_token_env: LARS_HUD_TOKEN   # set in ~/.hermes/.env; unset = auth disabled
   extra_origin_hosts: []            # e.g. ["192.168.1.10"] if you open the HUD by raw IP
 
 voice:

@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>JARVIS</title>
+<title>L.A.R.S</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="JARVIS">
+<meta name="apple-mobile-web-app-title" content="LARS">
 <meta name="theme-color" content="#050b14">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
@@ -68,7 +68,7 @@ header .sub{font-size:12px; letter-spacing:3px; color:var(--txt-dim)}
 }
 .msg{font-size:14.5px; line-height:1.35; padding:7px 11px; border:1px solid var(--line); background:#08152399; max-width:88%}
 .msg.you{align-self:flex-end; border-color:#205a6e; color:#cfeefb}
-.msg.jarvis{align-self:flex-start; border-left:2px solid var(--cyan)}
+.msg.lars{align-self:flex-start; border-left:2px solid var(--cyan)}
 .msg.sys{align-self:center; color:var(--txt-dim); font-size:12px; border:none; background:none; padding:2px}
 #chatRow{display:flex; gap:8px; width:100%; max-width:680px; padding:8px 10px}
 #chatInput{
@@ -245,13 +245,13 @@ footer{
   <div id="pinMsg" style="font-size:12px; color:var(--txt-dim); letter-spacing:2px">&nbsp;</div>
 </div>
 <div id="boot">
-  <div id="bootLogo">J.A.R.V.I.S</div>
+  <div id="bootLogo">L.A.R.S</div>
   <div id="bootSub">HERMES NEURAL INTERFACE</div>
   <div id="bootLines"></div>
 </div>
 <div id="grid">
   <header>
-    <h1>J.A.R.V.I.S</h1>
+    <h1>L.A.R.S</h1>
     <div class="sub">HERMES AGENT INTERFACE &nbsp;//&nbsp; <span id="connState">LINK DOWN</span></div>
     <div id="clock">--:--:--</div>
   </header>
@@ -283,8 +283,8 @@ footer{
       <button class="btn viewBtn" onclick="openView('CHAT','/chat')">▸ DASHBOARD CHAT</button>
     </div>
     <div class="panel"><h2><span>SESSION</span><span class="num">05</span></h2>
-      <div class="kv"><span>Conversation</span><b>jarvis-main</b></div>
-      <div class="kv"><span>Memory scope</span><b>jarvis:user:main</b></div>
+      <div class="kv"><span>Conversation</span><b>lars-main</b></div>
+      <div class="kv"><span>Memory scope</span><b>lars:user:main</b></div>
       <div class="kv"><span>Active sessions</span><b id="hSessions">—</b></div>
       <div class="kv"><span>Running agents</span><b id="hAgents">—</b></div>
     </div>
@@ -549,7 +549,7 @@ function handleServerEvent(e){
       if(tm.time_to_first_tts_audio_byte_seconds!=null)$("mFirst").textContent=tm.time_to_first_tts_audio_byte_seconds+"s";
       if(tm.total_turn_seconds!=null)$("mTotal").textContent=tm.total_turn_seconds+"s";
       $("mBrain").textContent=tm.llm_provider||"—";
-      if(tm.response_text)addMsg("jarvis",tm.response_text);
+      if(tm.response_text)addMsg("lars",tm.response_text);
       setTimeout(()=>{if(state!=="listening")setState("standby","STANDBY")},400);
     }
 }
@@ -646,7 +646,7 @@ async function sendChat(){
     const j=await r.json();
     if(!r.ok)throw new Error(j.detail||r.status);
     (j.tools_used||[]).forEach(t=>addActivity("",t,""));
-    addMsg("jarvis",j.response||"(no reply)");
+    addMsg("lars",j.response||"(no reply)");
     if(/^\/(new|reset|clear)\b/i.test(text)){     // slash reset → also clear the visible feed
       setTimeout(()=>{feed.innerHTML="";addMsg("sys","conversation reset");},800);
     }
@@ -829,7 +829,7 @@ function showPinGate(){
 }
 $("pinBtn").onclick=async()=>{
   const v=$("pinInput").value.trim(); if(!v)return;
-  document.cookie=`jarvis_token=${encodeURIComponent(v)}; path=/; max-age=31536000; secure; samesite=lax`;
+  document.cookie=`lars_token=${encodeURIComponent(v)}; path=/; max-age=31536000; secure; samesite=lax`;
   const r=await fetch("/api/usage");
   if(r.status===401){$("pinMsg").textContent="ACCESS DENIED";$("pinInput").value="";return}
   location.reload();
@@ -878,7 +878,7 @@ addEventListener("keydown",e=>{
 });
 bootSequence(new URLSearchParams(location.search).get("boot")==="full");
 
-addMsg("sys","Jarvis HUD online. Click the ring or press Space to talk.");
+addMsg("sys","Lars HUD online. Click the ring or press Space to talk.");
 </script>
 </body>
 </html>
