@@ -466,6 +466,42 @@ async def latency():
 
 # ------------------------------------------------------ jobs / kanban panel feed
 
+@app.get("/api/machines")
+async def machines():
+    """Machines panel feed: THIS host (psutil) + optional remote workers from cfg."""
+    import psutil
+    vm = psutil.virtual_memory()
+    du = psutil.cpu_times_percent(interval=0.2)
+    m = {"name": "LARS15 HOST", "cpu": du.user + du.system,
+         "mem": vm.percent,
+         "note": f"{psutil.cpu_count()} threads"}
+    out = {"machines": [m]}
+    for remote in (CFG.get("machines") or []):
+        try:
+            r = await asyncio.to_thread(lambda: requests.get(remote["stats_url"], timeout=4))
+            if r.ok:
+                out["machines"].append({"name": remote["name"], **r.json()})
+        except Exception:
+            out["machines"].append({"name": remote["name"], "note": "offline"})
+    return out
+
+
+@app.get("/api/usage")
+async def usage():
+    """Usage panel feed: local counters + gateway's own usage if exposed."""
+    upath = LOG_DIR / "usage_stats.json"
+    local = json.loads(upath.read_text()) if upath.exists() else {}
+    gw = None
+    try:
+        r = await asyncio.to_thread(lambda: requests.get(f"{BRIDGE.base}/api/usage",
+                                    headers=BRIDGE.headers(), timeout=5))
+        if r.ok:
+            gw = r.json()
+    except Exception:
+        gw = None
+    return {"local": local, "gateway": gw}
+
+
 _allowed = ("/api/jobs", "/v1/skills", "/v1/toolsets", "/api/sessions", "/health", "/health/detailed", "/v1/capabilities", "/v1/toolsets")
 
 
