@@ -466,7 +466,7 @@ async def latency():
 
 # ------------------------------------------------------ jobs / kanban panel feed
 
-_allowed = ("/api/jobs", "/v1/skills", "/v1/toolsets", "/api/sessions")
+_allowed = ("/api/jobs", "/v1/skills", "/v1/toolsets", "/api/sessions", "/health", "/health/detailed", "/v1/capabilities", "/v1/toolsets")
 
 
 @app.get("/api/hermes/{path:path}")
