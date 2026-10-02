@@ -1,0 +1,6 @@
+name: hud_display
+version: 1.0.0
+description: Display media as holographic panels on the Jarvis HUD
+provides_tools:
+  - hud_display
+  - hud_dismiss
